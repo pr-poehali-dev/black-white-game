@@ -256,70 +256,122 @@ const Arena = ({ playerWeapon, onWin, onLose }: ArenaProps) => {
   );
 };
 
-/* ---- Articulated silhouette fighter ---- */
+/* ---- Articulated silhouette fighter via SVG skeleton ---- */
 const Silhouette = ({ f, color }: { f: Fighter; color: string }) => {
   const now = performance.now();
-  const feetY = GROUND_Y + f.y;
   const t = f.animT;
-  const face = f.facing;
   const hurt = now < f.hurtUntil;
 
-  const swing = Math.sin(t) * (f.action === 'walk' ? 26 : 6);
-  let frontArm = 40 + swing;
-  let backArm = 40 - swing;
-  let frontLeg = 8 + swing;
-  let backLeg = 8 - swing;
-  let torsoLean = 0;
-  let bodyH = 100;
+  // Body proportions (relative to SVG canvas 80x200)
+  const cx = 40; // center X
+  const headR = 13;
+  const headCY = 22;
+  const neckY = headCY + headR;
+  const shoulderY = neckY + 8;
+  const hipY = shoulderY + 54;
+  const armLen = 44;
+  const foreLen = 38;
+  const thighLen = 46;
+  const shinLen = 44;
 
-  if (f.action === 'punch') { frontArm = -85; backArm = 55; torsoLean = 8; }
-  else if (f.action === 'kick') { frontLeg = -78; backLeg = 22; torsoLean = -10; }
-  else if (f.action === 'block') { frontArm = -40; backArm = -40; torsoLean = 4; }
-  else if (f.action === 'crouch') { bodyH = 62; frontLeg = 55; backLeg = -55; }
-  else if (f.action === 'jump') { frontLeg = 50; backLeg = 50; frontArm = -30; backArm = -30; }
-  else if (f.action === 'hurt') { torsoLean = -18; frontArm = 70; backArm = 70; }
+  // Walk swing
+  const swing = Math.sin(t) * (f.action === 'walk' ? 22 : 4);
 
-  const hipY = feetY - bodyH * 0.5;
-  const shoulderY = feetY - bodyH;
-  const headY = shoulderY - 22;
+  // Arm angles (deg from vertical down = 0, left = -90, right = +90, up = ±180)
+  let lArmA = 30 + swing;   // front arm
+  let rArmA = 30 - swing;   // back arm
+  let lForeA = 20;
+  let rForeA = 20;
 
-  const limb = (angleDeg: number, len: number, w: number, oy: number) => (
-    <div
-      style={{
-        position: 'absolute',
-        left: 0,
-        top: oy,
-        width: w,
-        height: len,
-        background: color,
-        transformOrigin: 'top center',
-        transform: `translateX(-50%) rotate(${angleDeg}deg)`,
-        borderRadius: w,
-      }}
-    />
-  );
+  // Leg angles
+  let lLegA = 10 + swing;
+  let rLegA = 10 - swing;
+  let lShinA = 12;
+  let rShinA = 12;
+
+  let torsoTilt = 0;
+  let crouching = false;
+
+  if (f.action === 'punch') {
+    lArmA = -60; lForeA = -70; rArmA = 45; torsoTilt = 15;
+  } else if (f.action === 'kick') {
+    lLegA = -85; lShinA = -30; rLegA = 25; torsoTilt = -12;
+  } else if (f.action === 'block') {
+    lArmA = -50; lForeA = -80; rArmA = -50; rForeA = -80; torsoTilt = 8;
+  } else if (f.action === 'crouch') {
+    crouching = true;
+    lLegA = 50; lShinA = -85; rLegA = -50; rShinA = 85; torsoTilt = 20;
+  } else if (f.action === 'jump') {
+    lLegA = -35; rLegA = -35; lShinA = -40; rShinA = -40;
+    lArmA = -40; rArmA = -40;
+  } else if (f.action === 'hurt') {
+    lArmA = 80; rArmA = 80; torsoTilt = -20;
+  }
+
+  const toRad = (d: number) => (d * Math.PI) / 180;
+
+  // Endpoint from pivot at given angle (0=down) and length
+  const ep = (px: number, py: number, angleDeg: number, len: number) => ({
+    x: px + Math.sin(toRad(angleDeg)) * len,
+    y: py + Math.cos(toRad(angleDeg)) * len,
+  });
+
+  // Shoulder joints
+  const lShoulder = { x: cx - 9, y: shoulderY };
+  const rShoulder = { x: cx + 9, y: shoulderY };
+  // Elbow
+  const lElbow = ep(lShoulder.x, lShoulder.y, lArmA, armLen);
+  const rElbow = ep(rShoulder.x, rShoulder.y, rArmA, armLen);
+  // Hand
+  const lHand = ep(lElbow.x, lElbow.y, lArmA + lForeA, foreLen);
+  const rHand = ep(rElbow.x, rElbow.y, rArmA + rForeA, foreLen);
+
+  // Hip joints
+  const lHip = { x: cx - 7, y: hipY };
+  const rHip = { x: cx + 7, y: hipY };
+  // Knee
+  const lKnee = ep(lHip.x, lHip.y, lLegA, thighLen);
+  const rKnee = ep(rHip.x, rHip.y, rLegA, thighLen);
+  // Foot
+  const lFoot = ep(lKnee.x, lKnee.y, lLegA + lShinA, shinLen);
+  const rFoot = ep(rKnee.x, rKnee.y, rLegA + rShinA, shinLen);
+
+  const svgH = 220;
+  const sw = 5; // stroke width
 
   return (
-    <div
-      className="absolute z-10"
+    <svg
+      width={80}
+      height={svgH}
+      className="absolute z-10 overflow-visible"
       style={{
-        left: f.x,
-        top: 0,
-        transform: `scaleX(${face})`,
-        transformOrigin: 'center',
-        filter: hurt ? 'invert(1) brightness(0.35)' : 'none',
+        left: f.x - 40,
+        top: (GROUND_Y + f.y) - svgH,
+        transform: `scaleX(${f.facing})`,
+        transformOrigin: '40px center',
+        filter: hurt ? 'invert(1) brightness(0.4)' : 'none',
         transition: 'filter 0.05s',
       }}
     >
-      <div style={{ transform: `rotate(${torsoLean}deg)`, transformOrigin: `0px ${hipY}px` }}>
-        {limb(180 + backLeg, feetY - hipY, 12, hipY)}
-        {limb(180 + backArm, bodyH * 0.42, 9, shoulderY + 4)}
-        <div style={{ position: 'absolute', left: -8, top: shoulderY, width: 16, height: bodyH * 0.55, background: color, borderRadius: 8 }} />
-        {limb(180 + frontLeg, feetY - hipY, 13, hipY)}
-        {limb(180 + frontArm, bodyH * 0.42, 10, shoulderY + 4)}
-        <div style={{ position: 'absolute', left: -13, top: headY, width: 26, height: 26, background: color, borderRadius: '50%' }} />
-      </div>
-    </div>
+      <g style={{ transform: `rotate(${torsoTilt}deg)`, transformOrigin: `${cx}px ${crouching ? hipY - 10 : (shoulderY + hipY) / 2}px` }}>
+        {/* back arm */}
+        <line x1={rShoulder.x} y1={rShoulder.y} x2={rElbow.x} y2={rElbow.y} stroke={color} strokeWidth={sw - 1} strokeLinecap="round" />
+        <line x1={rElbow.x} y1={rElbow.y} x2={rHand.x} y2={rHand.y} stroke={color} strokeWidth={sw - 1} strokeLinecap="round" />
+        {/* back leg */}
+        <line x1={rHip.x} y1={rHip.y} x2={rKnee.x} y2={rKnee.y} stroke={color} strokeWidth={sw} strokeLinecap="round" />
+        <line x1={rKnee.x} y1={rKnee.y} x2={rFoot.x} y2={rFoot.y} stroke={color} strokeWidth={sw} strokeLinecap="round" />
+        {/* torso */}
+        <line x1={cx} y1={shoulderY} x2={cx} y2={hipY} stroke={color} strokeWidth={sw + 3} strokeLinecap="round" />
+        {/* front leg */}
+        <line x1={lHip.x} y1={lHip.y} x2={lKnee.x} y2={lKnee.y} stroke={color} strokeWidth={sw + 1} strokeLinecap="round" />
+        <line x1={lKnee.x} y1={lKnee.y} x2={lFoot.x} y2={lFoot.y} stroke={color} strokeWidth={sw + 1} strokeLinecap="round" />
+        {/* front arm */}
+        <line x1={lShoulder.x} y1={lShoulder.y} x2={lElbow.x} y2={lElbow.y} stroke={color} strokeWidth={sw} strokeLinecap="round" />
+        <line x1={lElbow.x} y1={lElbow.y} x2={lHand.x} y2={lHand.y} stroke={color} strokeWidth={sw} strokeLinecap="round" />
+        {/* head */}
+        <circle cx={cx} cy={headCY} r={headR} fill={color} />
+      </g>
+    </svg>
   );
 };
 

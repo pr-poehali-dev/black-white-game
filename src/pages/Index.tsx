@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
 import { WEAPONS, Weapon, WeaponId, getWeapon } from '@/game/weapons';
 import Arena from '@/game/Arena';
 import { Slider } from '@/components/ui/slider';
@@ -81,8 +81,7 @@ const MenuScreen = ({ onSelect }: { onSelect: (s: Screen) => void }) => (
         <button
           key={m.key}
           onClick={() => onSelect(m.key as Screen)}
-          className="group font-pixel text-white/70 hover:text-black hover:bg-white transition-all duration-200 px-8 py-3 border-2 border-white/20 hover:border-white text-sm md:text-base tracking-wider animate-fade-in"
-          style={{ animationDelay: `${i * 80}ms`, animationFillMode: 'backwards' }}
+          className="group font-pixel text-white/70 hover:text-black hover:bg-white transition-all duration-200 px-8 py-3 border-2 border-white/20 hover:border-white text-sm md:text-base tracking-wider"
         >
           <span className="text-white/30 group-hover:text-black mr-3">{m.n}</span>
           {m.label}
@@ -186,19 +185,76 @@ const SettingsScreen = ({
 );
 
 /* ---------- COMING SOON ---------- */
-const ComingSoonScreen = ({ onBack }: { onBack: () => void }) => (
-  <div className="flex flex-col items-center justify-center min-h-screen animate-scale-in">
-    <h2 className="font-pixel text-3xl md:text-5xl text-white/30 animate-flicker mb-12">
-      COMING SOON...
-    </h2>
-    <button
-      onClick={onBack}
-      className="font-pixel text-sm px-8 py-3 border-2 border-white/30 text-white/60 hover:text-white hover:border-white transition-all"
-    >
-      НАЗАД
-    </button>
-  </div>
-);
+const DARK_PHRASES = ['i am useless', 'everybody hate me', 'always alone'];
+
+interface DarkMsg { id: number; text: string; x: number; y: number; rot: number }
+
+const ComingSoonScreen = ({ onBack }: { onBack: () => void }) => {
+  const [msgs, setMsgs] = useState<DarkMsg[]>([]);
+  const [dimmed, setDimmed] = useState(false);
+  const idRef = useRef(0);
+  const countRef = useRef(0);
+  const timerRef = useRef<ReturnType<typeof setTimeout>>();
+
+  useEffect(() => {
+    const schedule = () => {
+      if (countRef.current >= 20) {
+        setMsgs([]);
+        setDimmed(true);
+        return;
+      }
+      const delay = 900 + Math.random() * 700;
+      timerRef.current = setTimeout(() => {
+        const newMsg: DarkMsg = {
+          id: idRef.current++,
+          text: DARK_PHRASES[Math.floor(Math.random() * DARK_PHRASES.length)],
+          x: 5 + Math.random() * 78,
+          y: 5 + Math.random() * 82,
+          rot: -25 + Math.random() * 50,
+        };
+        setMsgs((m) => [...m, newMsg]);
+        countRef.current += 1;
+        schedule();
+      }, delay);
+    };
+    const first = setTimeout(schedule, 2000);
+    return () => {
+      clearTimeout(first);
+      clearTimeout(timerRef.current);
+    };
+  }, []);
+
+  return (
+    <div className="relative flex flex-col items-center justify-center min-h-screen animate-scale-in overflow-hidden">
+      {msgs.map((m) => (
+        <span
+          key={m.id}
+          className="absolute font-mono text-white/25 text-base pointer-events-none select-none"
+          style={{
+            left: `${m.x}%`,
+            top: `${m.y}%`,
+            transform: `rotate(${m.rot}deg)`,
+            whiteSpace: 'nowrap',
+          }}
+        >
+          {m.text}
+        </span>
+      ))}
+      <h2
+        className="font-pixel text-3xl md:text-5xl animate-flicker mb-12 transition-colors duration-1000 z-10"
+        style={{ color: dimmed ? 'rgba(255,255,255,0.12)' : 'rgba(255,255,255,0.30)' }}
+      >
+        COMING SOON...
+      </h2>
+      <button
+        onClick={onBack}
+        className="font-pixel text-sm px-8 py-3 border-2 border-white/30 text-white/60 hover:text-white hover:border-white transition-all z-10"
+      >
+        НАЗАД
+      </button>
+    </div>
+  );
+};
 
 /* ---------- CREDITS ---------- */
 const CreditsScreen = ({ onBack }: { onBack: () => void }) => (
