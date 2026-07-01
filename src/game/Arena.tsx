@@ -108,10 +108,12 @@ export default function Arena({ playerWeapon, onWin, onLose }: ArenaProps) {
       let pWalking = false;
       if (canAct(p, now)) {
         if (atkReq.current) {
+          atkReq.current = false;
           p.action = 'punch'; p.actionUntil = now + 220;
           p.cooldownUntil = now + playerWeapon.cooldown;
           tryHit(p, e, REACH_A, playerWeapon.damage, now, false);
         } else if (kickReq.current) {
+          kickReq.current = false;
           p.action = 'kick'; p.actionUntil = now + 300;
           p.cooldownUntil = now + playerWeapon.cooldown + 120;
           tryHit(p, e, REACH_K, playerWeapon.damage + 4, now, true);
@@ -122,7 +124,6 @@ export default function Arena({ playerWeapon, onWin, onLose }: ArenaProps) {
         } else if (keys.current['a']) { p.x -= MOVE * dt; pWalking = true; }
         else if (keys.current['d']) { p.x += MOVE * dt; pWalking = true; }
       }
-      atkReq.current = false; kickReq.current = false;
 
       p.vy += GRAV * dt; p.y += p.vy * dt;
       if (p.y >= 0) { p.y = 0; p.vy = 0; }
@@ -250,7 +251,7 @@ function ArenaBackground({ torchFlicker }: { torchFlicker: number }) {
 
       {/* Torches */}
       {[160, 800].map((x, i) => (
-        <g key={i}>
+        <React.Fragment key={i}>
           <div className="absolute" style={{ left: x - 4, top: 130, width: 8, height: 40, background: '#1a1a1a', zIndex: 5 }} />
           <div className="absolute" style={{ left: x - 12, top: 118, width: 24, height: 14, background: '#1e1e1e', zIndex: 5, borderRadius: 2 }} />
           {/* Flame */}
@@ -268,7 +269,7 @@ function ArenaBackground({ torchFlicker }: { torchFlicker: number }) {
             background: `radial-gradient(ellipse at 50% 30%, rgba(255,255,255,${0.08 * tf}) 0%, transparent 70%)`,
             zIndex: 4, pointerEvents: 'none',
           }} />
-        </g>
+        </React.Fragment>
       ))}
 
       {/* Ground platform */}

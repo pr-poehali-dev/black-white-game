@@ -23,12 +23,11 @@ export default function Index() {
   const goMenu = useCallback(() => setScreen('menu'), []);
 
   return (
-    <div className="crt-lines crt-vignette min-h-screen bg-black text-white">
-      {/* Alone.exe label — always visible, never intercepts clicks */}
-      <div
-        className="fixed bottom-3 left-4 z-[60] font-mono text-white/40 text-sm tracking-widest animate-flicker"
-        style={{ pointerEvents: 'none' }}
-      >
+    <div className="min-h-screen bg-black text-white">
+      {/* CRT overlay — отдельный слой, никогда не блокирует клики */}
+      <div className="crt-lines crt-vignette fixed inset-0 z-[55]" style={{ pointerEvents: 'none' }} />
+      {/* Alone.exe label */}
+      <div className="fixed bottom-3 left-4 z-[60] font-mono text-white/40 text-sm tracking-widest animate-flicker" style={{ pointerEvents: 'none' }}>
         Alone.exe started.
       </div>
 
