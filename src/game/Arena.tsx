@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState, useCallback } from 'react';
-import { Weapon, randomWeapon } from './weapons';
+import React, { useEffect, useRef, useState, useCallback } from 'react';
+import { Weapon, WeaponId, randomWeapon } from './weapons';
 
 interface ArenaProps {
   playerWeapon: Weapon;
@@ -7,12 +7,12 @@ interface ArenaProps {
   onLose: () => void;
 }
 
-type Action = 'idle' | 'walk' | 'punch' | 'kick' | 'block' | 'crouch' | 'jump' | 'hurt';
+type Action = 'idle' | 'walk' | 'punch' | 'kick' | 'jump' | 'crouch' | 'hurt';
 
 interface Fighter {
   x: number;
+  y: number;       // offset from ground, negative = up
   vy: number;
-  y: number; // vertical offset (0 = ground, negative = up)
   facing: 1 | -1;
   hp: number;
   action: Action;
@@ -20,359 +20,552 @@ interface Fighter {
   cooldownUntil: number;
   hurtUntil: number;
   animT: number;
+  weaponId: WeaponId;
 }
 
-const ARENA_W = 960;
-const ARENA_H = 500;
-const GROUND_Y = 420;
-const MOVE = 3.4;
-const GRAVITY = 1.1;
-const JUMP = -17;
-const REACH_PUNCH = 92;
-const REACH_KICK = 120;
+const W = 960;
+const H = 520;
+const GY = 400; // ground Y in canvas
+const MOVE = 3.6;
+const GRAV = 1.05;
+const JUMP_V = -18;
+const REACH_A = 100;  // punch reach
+const REACH_K = 130;  // kick reach
 
-const makeFighter = (x: number, facing: 1 | -1): Fighter => ({
-  x, vy: 0, y: 0, facing, hp: 100,
-  action: 'idle', actionUntil: 0, cooldownUntil: 0, hurtUntil: 0, animT: 0,
-});
+function mkFighter(x: number, facing: 1 | -1, weaponId: WeaponId): Fighter {
+  return { x, y: 0, vy: 0, facing, hp: 100, action: 'idle', actionUntil: 0, cooldownUntil: 0, hurtUntil: 0, animT: 0, weaponId };
+}
 
-const Arena = ({ playerWeapon, onWin, onLose }: ArenaProps) => {
+export default function Arena({ playerWeapon, onWin, onLose }: ArenaProps) {
   const enemyWeapon = useRef<Weapon>(randomWeapon());
   const keys = useRef<Record<string, boolean>>({});
-  const punchReq = useRef(false);
+  const atkReq = useRef(false);
   const kickReq = useRef(false);
   const raf = useRef<number>();
   const ended = useRef(false);
-  const last = useRef(performance.now());
-
-  const player = useRef<Fighter>(makeFighter(260, 1));
-  const enemy = useRef<Fighter>(makeFighter(700, -1));
+  const last = useRef(0);
   const aiNext = useRef(0);
-  const aiIntent = useRef<'chase' | 'back' | 'wait' | 'attack'>('chase');
+  const aiMode = useRef<'chase' | 'wait' | 'attack' | 'back'>('chase');
 
-  const [, force] = useState(0);
-  const [hits, setHits] = useState<{ id: number; x: number; y: number; big: boolean }[]>([]);
-  const hitId = useRef(0);
-  const [shake, setShake] = useState(0);
+  const P = useRef<Fighter>(mkFighter(220, 1, playerWeapon.id));
+  const E = useRef<Fighter>(mkFighter(740, -1, enemyWeapon.current.id));
 
-  const spawnHit = useCallback((x: number, y: number, big: boolean) => {
-    const id = hitId.current++;
-    setHits((h) => [...h, { id, x, y, big }]);
-    setShake(big ? 10 : 5);
-    setTimeout(() => setHits((h) => h.filter((f) => f.id !== id)), 300);
-    setTimeout(() => setShake(0), 120);
+  const [tick, setTick] = useState(0);
+  const [sparks, setSparks] = useState<{ id: number; x: number; y: number; big: boolean }[]>([]);
+  const [screenShake, setScreenShake] = useState(false);
+  const sparkId = useRef(0);
+  const [torchFlicker, setTorchFlicker] = useState(0);
+
+  const addSpark = useCallback((x: number, y: number, big: boolean) => {
+    const id = sparkId.current++;
+    setSparks((s) => [...s, { id, x, y, big }]);
+    if (big) { setScreenShake(true); setTimeout(() => setScreenShake(false), 120); }
+    setTimeout(() => setSparks((s) => s.filter((f) => f.id !== id)), 350);
   }, []);
 
   useEffect(() => {
-    const down = (e: KeyboardEvent) => {
+    const dn = (e: KeyboardEvent) => {
       const k = e.key.toLowerCase();
-      if (['w', 'a', 's', 'd', 'k', 'l', 'j'].includes(k)) e.preventDefault();
+      if ('wasdklj'.includes(k)) e.preventDefault();
       keys.current[k] = true;
-      if (k === 'k') punchReq.current = true;
+      if (k === 'k') atkReq.current = true;
       if (k === 'l') kickReq.current = true;
     };
     const up = (e: KeyboardEvent) => { keys.current[e.key.toLowerCase()] = false; };
-    window.addEventListener('keydown', down);
+    window.addEventListener('keydown', dn);
     window.addEventListener('keyup', up);
-    return () => {
-      window.removeEventListener('keydown', down);
-      window.removeEventListener('keyup', up);
-    };
+    // torch flicker
+    const tf = setInterval(() => setTorchFlicker(Math.random()), 80);
+    return () => { window.removeEventListener('keydown', dn); window.removeEventListener('keyup', up); clearInterval(tf); };
   }, []);
 
-  const canAct = (f: Fighter, now: number) =>
-    now > f.actionUntil && now > f.cooldownUntil && now > f.hurtUntil;
+  const canAct = (f: Fighter, now: number) => now > f.actionUntil && now > f.cooldownUntil && now > f.hurtUntil;
 
-  const tryHit = useCallback(
-    (attacker: Fighter, target: Fighter, reach: number, dmg: number, now: number, kick: boolean) => {
-      const dist = Math.abs(target.x - attacker.x);
-      const facingRight = target.x > attacker.x ? 1 : -1;
-      if (attacker.facing !== facingRight) return;
-      if (dist > reach) return;
-      if (!kick && target.action === 'crouch') return;
-      const blocked = target.action === 'block' && now < target.actionUntil + 400;
-      const hy = GROUND_Y + target.y - 120;
-      if (blocked) {
-        spawnHit((attacker.x + target.x) / 2, hy, false);
-        return;
-      }
-      target.hp -= dmg;
-      target.hurtUntil = now + 260;
-      target.action = 'hurt';
-      target.x += attacker.facing * 26;
-      target.x = Math.max(40, Math.min(ARENA_W - 40, target.x));
-      spawnHit((attacker.x + target.x) / 2, hy, dmg >= 16 || kick);
-    },
-    [spawnHit],
-  );
+  const tryHit = useCallback((atk: Fighter, def: Fighter, reach: number, dmg: number, now: number, isKick: boolean) => {
+    const dist = Math.abs(def.x - atk.x);
+    if (dist > reach) return;
+    if (atk.facing !== (def.x >= atk.x ? 1 : -1)) return;
+    if (!isKick && def.action === 'crouch') return;
+    def.hp = Math.max(0, def.hp - dmg);
+    def.hurtUntil = now + 280;
+    def.action = 'hurt';
+    def.x = Math.max(50, Math.min(W - 50, def.x + atk.facing * 30));
+    addSpark((atk.x + def.x) / 2, GY + def.y - 80, isKick || dmg >= 16);
+  }, [addSpark]);
 
   useEffect(() => {
-    const step = (now: number) => {
-      const dt = Math.min(2.5, (now - last.current) / 16.67);
+    const loop = (now: number) => {
+      if (!last.current) last.current = now;
+      const dt = Math.min(3, (now - last.current) / 16.67);
       last.current = now;
-      const p = player.current;
-      const en = enemy.current;
 
-      p.facing = en.x >= p.x ? 1 : -1;
-      en.facing = p.x >= en.x ? 1 : -1;
+      const p = P.current;
+      const e = E.current;
+      p.facing = e.x >= p.x ? 1 : -1;
+      e.facing = p.x >= e.x ? 1 : -1;
 
-      // ---------- PLAYER ----------
-      let pMoving = false;
+      // ── player ──
+      let pWalking = false;
       if (canAct(p, now)) {
-        if (keys.current['j']) {
-          p.action = 'block';
-          p.actionUntil = now + 80;
-        } else if (punchReq.current) {
-          p.action = 'punch';
-          p.actionUntil = now + 220;
+        if (atkReq.current) {
+          p.action = 'punch'; p.actionUntil = now + 220;
           p.cooldownUntil = now + playerWeapon.cooldown;
-          tryHit(p, en, REACH_PUNCH, playerWeapon.damage, now, false);
+          tryHit(p, e, REACH_A, playerWeapon.damage, now, false);
         } else if (kickReq.current) {
-          p.action = 'kick';
-          p.actionUntil = now + 300;
-          p.cooldownUntil = now + playerWeapon.cooldown + 150;
-          tryHit(p, en, REACH_KICK, playerWeapon.damage + 3, now, true);
+          p.action = 'kick'; p.actionUntil = now + 300;
+          p.cooldownUntil = now + playerWeapon.cooldown + 120;
+          tryHit(p, e, REACH_K, playerWeapon.damage + 4, now, true);
         } else if (keys.current['w'] && p.y === 0) {
-          p.vy = JUMP;
-          p.action = 'jump';
+          p.vy = JUMP_V; p.action = 'jump';
         } else if (keys.current['s']) {
-          p.action = 'crouch';
-          p.actionUntil = now + 60;
-        } else if (keys.current['a']) {
-          p.x -= MOVE * dt; pMoving = true;
-        } else if (keys.current['d']) {
-          p.x += MOVE * dt; pMoving = true;
-        }
+          p.action = 'crouch'; p.actionUntil = now + 60;
+        } else if (keys.current['a']) { p.x -= MOVE * dt; pWalking = true; }
+        else if (keys.current['d']) { p.x += MOVE * dt; pWalking = true; }
       }
-      punchReq.current = false;
-      kickReq.current = false;
+      atkReq.current = false; kickReq.current = false;
 
-      p.vy += GRAVITY * dt;
-      p.y += p.vy * dt;
+      p.vy += GRAV * dt; p.y += p.vy * dt;
       if (p.y >= 0) { p.y = 0; p.vy = 0; }
-      p.x = Math.max(40, Math.min(ARENA_W - 40, p.x));
-      if (now > p.actionUntil && now > p.hurtUntil && p.y === 0)
-        p.action = pMoving ? 'walk' : 'idle';
-      if (p.y < 0 && p.action !== 'kick' && p.action !== 'punch') p.action = 'jump';
-      p.animT += dt * (pMoving ? 0.35 : 0.12);
+      p.x = Math.max(50, Math.min(W - 50, p.x));
+      if (now > p.actionUntil && now > p.hurtUntil && p.y === 0) p.action = pWalking ? 'walk' : 'idle';
+      if (p.y < 0) p.action = 'jump';
+      p.animT += dt * (pWalking ? 0.32 : 0.1);
 
-      // ---------- ENEMY AI ----------
-      const dist = Math.abs(p.x - en.x);
-      const dir = p.x > en.x ? 1 : -1;
-      let eMoving = false;
+      // ── enemy AI ──
+      const dist = Math.abs(p.x - e.x);
+      let eWalking = false;
       if (now > aiNext.current) {
-        aiNext.current = now + 260 + Math.random() * 420;
-        if (dist > REACH_KICK + 30) aiIntent.current = 'chase';
+        aiNext.current = now + 200 + Math.random() * 500;
+        if (dist > REACH_A + 40) aiMode.current = 'chase';
         else {
           const r = Math.random();
-          if (r < 0.5) aiIntent.current = 'attack';
-          else if (r < 0.7) aiIntent.current = 'back';
-          else if (r < 0.85) aiIntent.current = 'wait';
-          else aiIntent.current = 'chase';
+          aiMode.current = r < 0.55 ? 'attack' : r < 0.75 ? 'back' : 'wait';
         }
       }
-      if (canAct(en, now)) {
-        if (aiIntent.current === 'chase') {
-          en.x += dir * (MOVE - 0.6) * dt; eMoving = true;
-        } else if (aiIntent.current === 'back') {
-          en.x -= dir * (MOVE - 1) * dt; eMoving = true;
-        } else if (aiIntent.current === 'attack' && dist < REACH_KICK) {
-          const useKick = Math.random() < 0.4;
-          en.action = useKick ? 'kick' : 'punch';
-          en.actionUntil = now + (useKick ? 300 : 220);
-          en.cooldownUntil = now + enemyWeapon.current.cooldown + 250;
-          tryHit(en, p, useKick ? REACH_KICK : REACH_PUNCH, enemyWeapon.current.damage, now, useKick);
-          aiIntent.current = 'wait';
+      if (canAct(e, now)) {
+        const dir = p.x > e.x ? 1 : -1;
+        if (aiMode.current === 'chase') { e.x += dir * (MOVE - 0.8) * dt; eWalking = true; }
+        else if (aiMode.current === 'back') { e.x -= dir * (MOVE - 1.2) * dt; eWalking = true; }
+        else if (aiMode.current === 'attack' && dist < REACH_K) {
+          const kick = Math.random() < 0.35;
+          e.action = kick ? 'kick' : 'punch';
+          e.actionUntil = now + (kick ? 300 : 220);
+          e.cooldownUntil = now + enemyWeapon.current.cooldown + 300;
+          tryHit(e, p, kick ? REACH_K : REACH_A, enemyWeapon.current.damage, now, kick);
+          aiMode.current = 'wait';
         }
       }
-      en.x = Math.max(40, Math.min(ARENA_W - 40, en.x));
-      if (now > en.actionUntil && now > en.hurtUntil) en.action = eMoving ? 'walk' : 'idle';
-      en.animT += dt * (eMoving ? 0.35 : 0.12);
+      e.x = Math.max(50, Math.min(W - 50, e.x));
+      if (now > e.actionUntil && now > e.hurtUntil) e.action = eWalking ? 'walk' : 'idle';
+      e.animT += dt * (eWalking ? 0.32 : 0.1);
 
-      // ---------- END ----------
       if (!ended.current) {
-        if (en.hp <= 0) { ended.current = true; cancelAnimationFrame(raf.current!); onWin(); return; }
+        if (e.hp <= 0) { ended.current = true; cancelAnimationFrame(raf.current!); onWin(); return; }
         if (p.hp <= 0) { ended.current = true; cancelAnimationFrame(raf.current!); onLose(); return; }
       }
 
-      force((n) => (n + 1) % 1e9);
-      raf.current = requestAnimationFrame(step);
+      setTick((t) => (t + 1) & 0xffffff);
+      raf.current = requestAnimationFrame(loop);
     };
-    raf.current = requestAnimationFrame(step);
+    raf.current = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(raf.current!);
   }, [playerWeapon, onWin, onLose, tryHit]);
 
-  const p = player.current;
-  const en = enemy.current;
+  const p = P.current;
+  const e = E.current;
+  const sx = screenShake ? (Math.random() - 0.5) * 8 : 0;
+  const sy = screenShake ? (Math.random() - 0.5) * 8 : 0;
 
   return (
-    <div className="w-full h-screen flex items-center justify-center bg-black animate-fade-in overflow-hidden">
+    <div className="w-full h-screen flex items-center justify-center bg-black overflow-hidden animate-fade-in">
       <div
-        className="relative overflow-hidden border-2 border-white/10"
-        style={{
-          width: ARENA_W,
-          height: ARENA_H,
-          transform: shake ? `translate(${(Math.random() - 0.5) * shake}px, ${(Math.random() - 0.5) * shake}px)` : 'none',
-          background: 'linear-gradient(180deg, #d8d8d8 0%, #b8b8b8 55%, #9a9a9a 55%, #7a7a7a 100%)',
-        }}
+        className="relative overflow-hidden"
+        style={{ width: W, height: H, transform: `translate(${sx}px,${sy}px)` }}
       >
-        <div className="absolute rounded-full" style={{ width: 140, height: 140, left: 400, top: 40, background: 'radial-gradient(circle,#fff,#e5e5e5)', opacity: 0.5 }} />
-        <div className="absolute left-0 right-0" style={{ top: GROUND_Y, height: 3, background: '#000' }} />
-        <div className="absolute left-0 right-0 bottom-0" style={{ top: GROUND_Y, background: 'repeating-linear-gradient(90deg,#6a6a6a 0 40px,#5a5a5a 40px 80px)' }} />
+        {/* ── BACKGROUND ── */}
+        <ArenaBackground torchFlicker={torchFlicker} />
 
-        <div className="absolute top-4 left-6 right-6 flex justify-between gap-10 font-pixel text-[9px] text-black z-20">
-          <div className="flex-1">
-            <div className="mb-1">YOU {playerWeapon.emoji}</div>
-            <div className="h-4 border-2 border-black bg-white/70">
-              <div className="h-full bg-black transition-all duration-200" style={{ width: `${Math.max(0, p.hp)}%` }} />
-            </div>
-          </div>
-          <div className="flex-1 text-right">
-            <div className="mb-1">{enemyWeapon.current.emoji} BOT</div>
-            <div className="h-4 border-2 border-black bg-white/70">
-              <div className="h-full bg-black ml-auto transition-all duration-200" style={{ width: `${Math.max(0, en.hp)}%` }} />
-            </div>
-          </div>
-        </div>
+        {/* ── HP BARS ── */}
+        <HpBars p={p} e={e} pw={playerWeapon} ew={enemyWeapon.current} />
 
-        <Silhouette f={p} color="#050505" />
-        <Silhouette f={en} color="#242424" />
+        {/* ── FIGHTERS ── */}
+        <FighterSVG f={p} weapon={playerWeapon} />
+        <FighterSVG f={e} weapon={enemyWeapon.current} />
 
-        {hits.map((h) => (
-          <div
-            key={h.id}
-            className="absolute z-30 pointer-events-none animate-scale-in font-pixel text-black"
-            style={{ left: h.x, top: h.y, transform: 'translate(-50%,-50%)', fontSize: h.big ? 46 : 30 }}
-          >
-            {h.big ? '✸' : '✦'}
+        {/* ── SPARKS ── */}
+        {sparks.map((s) => (
+          <div key={s.id} className="absolute pointer-events-none z-40 animate-scale-in font-pixel"
+            style={{ left: s.x, top: s.y, transform: 'translate(-50%,-50%)', fontSize: s.big ? 52 : 32, color: '#fff', textShadow: '0 0 12px #fff' }}>
+            {s.big ? '✸' : '✦'}
           </div>
         ))}
 
-        <div className="absolute bottom-2 left-1/2 -translate-x-1/2 font-mono text-black/60 text-sm whitespace-nowrap z-20">
-          A/D ходьба · W прыжок · S присесть · K удар · L пинок · J блок
+        {/* ── CONTROLS HINT ── */}
+        <div className="absolute bottom-2 left-1/2 -translate-x-1/2 font-mono text-black/50 text-xs whitespace-nowrap z-20 tracking-wide">
+          A/D движение · W прыжок · S присест · K удар · L пинок
         </div>
       </div>
     </div>
   );
-};
+}
 
-/* ---- Articulated silhouette fighter via SVG skeleton ---- */
-const Silhouette = ({ f, color }: { f: Fighter; color: string }) => {
+/* ═══════════════════════════════════════
+   ARENA BACKGROUND
+═══════════════════════════════════════ */
+function ArenaBackground({ torchFlicker }: { torchFlicker: number }) {
+  const tf = 0.82 + torchFlicker * 0.18;
+  return (
+    <>
+      {/* Sky gradient */}
+      <div className="absolute inset-0" style={{ background: 'linear-gradient(180deg,#1a1a1a 0%,#2e2e2e 40%,#3c3c3c 60%,#4a4a4a 100%)' }} />
+
+      {/* Distant pillars */}
+      {[120, 300, 500, 660, 840].map((x, i) => (
+        <div key={i} className="absolute" style={{ left: x - 18, top: 60, width: 36, height: 280, background: '#1c1c1c', borderLeft: '2px solid #2a2a2a', borderRight: '2px solid #2a2a2a' }}>
+          <div style={{ position: 'absolute', top: 0, left: -6, right: -6, height: 20, background: '#222' }} />
+          <div style={{ position: 'absolute', bottom: 0, left: -6, right: -6, height: 20, background: '#222' }} />
+          {/* Pillar detail lines */}
+          {[60, 120, 180, 240].map((y) => (
+            <div key={y} style={{ position: 'absolute', top: y, left: 4, right: 4, height: 1, background: '#282828' }} />
+          ))}
+        </div>
+      ))}
+
+      {/* Wall back */}
+      <div className="absolute left-0 right-0" style={{ top: 60, height: 300, background: '#262626', borderBottom: '3px solid #1a1a1a' }}>
+        {/* Brick pattern */}
+        {Array.from({ length: 8 }).map((_, row) =>
+          Array.from({ length: 16 }).map((_, col) => (
+            <div key={`${row}-${col}`} style={{
+              position: 'absolute',
+              left: col * 60 + (row % 2 ? 30 : 0),
+              top: row * 36,
+              width: 56, height: 32,
+              border: '1px solid #1e1e1e',
+              background: row % 3 === 0 ? '#252525' : '#232323',
+            }} />
+          ))
+        )}
+      </div>
+
+      {/* Torches */}
+      {[160, 800].map((x, i) => (
+        <g key={i}>
+          <div className="absolute" style={{ left: x - 4, top: 130, width: 8, height: 40, background: '#1a1a1a', zIndex: 5 }} />
+          <div className="absolute" style={{ left: x - 12, top: 118, width: 24, height: 14, background: '#1e1e1e', zIndex: 5, borderRadius: 2 }} />
+          {/* Flame */}
+          <div className="absolute" style={{
+            left: x - 10, top: 94,
+            width: 20, height: 28,
+            background: `radial-gradient(ellipse at 50% 100%, rgba(255,255,255,${0.9 * tf}) 0%, rgba(180,180,180,${0.6 * tf}) 40%, transparent 80%)`,
+            zIndex: 6, borderRadius: '50% 50% 40% 40%',
+            transform: `scaleY(${0.85 + torchFlicker * 0.3}) scaleX(${0.8 + torchFlicker * 0.2})`,
+          }} />
+          {/* Glow */}
+          <div className="absolute" style={{
+            left: x - 60, top: 80,
+            width: 120, height: 100,
+            background: `radial-gradient(ellipse at 50% 30%, rgba(255,255,255,${0.08 * tf}) 0%, transparent 70%)`,
+            zIndex: 4, pointerEvents: 'none',
+          }} />
+        </g>
+      ))}
+
+      {/* Ground platform */}
+      <div className="absolute left-0 right-0" style={{ top: GY, height: H - GY, background: '#1a1a1a' }}>
+        {/* Floor tiles */}
+        {Array.from({ length: 17 }).map((_, i) => (
+          <div key={i} style={{
+            position: 'absolute', left: i * 57, top: 0,
+            width: 55, height: 24,
+            background: i % 2 === 0 ? '#202020' : '#1d1d1d',
+            borderRight: '1px solid #161616', borderBottom: '1px solid #161616',
+          }}>
+            {/* Tile crack detail */}
+            {i % 3 === 1 && <div style={{ position: 'absolute', left: 8, top: 6, width: 20, height: 1, background: '#2a2a2a', transform: 'rotate(-15deg)' }} />}
+          </div>
+        ))}
+        {/* Floor edge highlight */}
+        <div style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 3, background: '#333' }} />
+        <div style={{ position: 'absolute', top: 3, left: 0, right: 0, height: 1, background: '#2a2a2a' }} />
+        {/* Floor depth lines */}
+        {[40, 80, 120].map((y) => (
+          <div key={y} style={{ position: 'absolute', top: y, left: 0, right: 0, height: 1, background: 'rgba(0,0,0,0.3)' }} />
+        ))}
+      </div>
+
+      {/* Chains */}
+      {[200, 760].map((x, i) => (
+        <div key={i} className="absolute" style={{ left: x, top: 60, width: 2, height: 120, background: 'repeating-linear-gradient(180deg,#2a2a2a 0 8px,transparent 8px 12px)', zIndex: 3 }} />
+      ))}
+
+      {/* Ground mist */}
+      <div className="absolute left-0 right-0" style={{
+        top: GY - 20, height: 40,
+        background: 'linear-gradient(180deg, transparent, rgba(40,40,40,0.4) 50%, transparent)',
+        pointerEvents: 'none', zIndex: 8,
+      }} />
+    </>
+  );
+}
+
+/* ═══════════════════════════════════════
+   HP BARS
+═══════════════════════════════════════ */
+function HpBars({ p, e, pw, ew }: { p: Fighter; e: Fighter; pw: Weapon; ew: Weapon }) {
+  return (
+    <div className="absolute top-4 left-4 right-4 z-30 flex gap-4 items-start">
+      {/* Player */}
+      <div className="flex-1">
+        <div className="font-pixel text-[9px] text-white/80 mb-1 flex items-center gap-1">
+          <span className="text-white">YOU</span>
+          <span className="text-white/40">{pw.name}</span>
+        </div>
+        <div className="relative h-5 border border-white/40" style={{ background: '#111' }}>
+          <div className="h-full transition-all duration-150" style={{ width: `${Math.max(0, p.hp)}%`, background: p.hp > 50 ? '#e0e0e0' : p.hp > 25 ? '#888' : '#555' }} />
+          <div className="absolute inset-0 border-t border-white/10" />
+        </div>
+        <div className="font-mono text-[10px] text-white/30 mt-0.5">{Math.max(0, Math.round(p.hp))} / 100</div>
+      </div>
+      {/* VS */}
+      <div className="font-pixel text-white/30 text-xs pt-2">VS</div>
+      {/* Enemy */}
+      <div className="flex-1 text-right">
+        <div className="font-pixel text-[9px] text-white/80 mb-1 flex items-center justify-end gap-1">
+          <span className="text-white/40">{ew.name}</span>
+          <span className="text-white">BOT</span>
+        </div>
+        <div className="relative h-5 border border-white/40" style={{ background: '#111' }}>
+          <div className="h-full ml-auto transition-all duration-150" style={{ width: `${Math.max(0, e.hp)}%`, background: e.hp > 50 ? '#e0e0e0' : e.hp > 25 ? '#888' : '#555' }} />
+          <div className="absolute inset-0 border-t border-white/10" />
+        </div>
+        <div className="font-mono text-[10px] text-white/30 mt-0.5">{Math.max(0, Math.round(e.hp))} / 100</div>
+      </div>
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════
+   FIGHTER SVG  — SF2-style silhouette
+═══════════════════════════════════════ */
+interface FighterProps { f: Fighter; weapon: Weapon }
+
+function FighterSVG({ f, weapon }: FighterProps) {
   const now = performance.now();
   const t = f.animT;
   const hurt = now < f.hurtUntil;
 
-  // Body proportions (relative to SVG canvas 80x200)
-  const cx = 40; // center X
-  const headR = 13;
-  const headCY = 22;
-  const neckY = headCY + headR;
-  const shoulderY = neckY + 8;
-  const hipY = shoulderY + 54;
-  const armLen = 44;
-  const foreLen = 38;
-  const thighLen = 46;
-  const shinLen = 44;
+  // Canvas: 120×260, feet at y=250
+  const SVG_W = 120;
+  const SVG_H = 260;
+  const FEET_Y = 250;
 
-  // Walk swing
-  const swing = Math.sin(t) * (f.action === 'walk' ? 22 : 4);
+  // Body proportions (SF2-ish)
+  const HEAD_R = 16;
+  const HEAD_CY = 28;
+  const NECK_Y = HEAD_CY + HEAD_R + 2;
+  const SHOULDER_Y = NECK_Y + 12;
+  const HIP_Y = SHOULDER_Y + 62;
+  const CX = 60;
 
-  // Arm angles (deg from vertical down = 0, left = -90, right = +90, up = ±180)
-  let lArmA = 30 + swing;   // front arm
-  let rArmA = 30 - swing;   // back arm
-  let lForeA = 20;
-  let rForeA = 20;
+  // Arm segments
+  const U_ARM = 38;  // upper arm length
+  const L_ARM = 34;  // forearm
+  // Leg segments
+  const THIGH = 48;
+  const SHIN = 46;
 
-  // Leg angles
-  let lLegA = 10 + swing;
-  let rLegA = 10 - swing;
-  let lShinA = 12;
-  let rShinA = 12;
+  // Walk cycle
+  const sw = Math.sin(t) * (f.action === 'walk' ? 28 : 5);
 
+  // Default relaxed pose angles (degrees, 0=straight down from joint)
+  let lUA = 20 + sw;   // left upper arm (front)
+  let lLA = 15;        // left forearm
+  let rUA = 20 - sw;   // right upper arm (back)
+  let rLA = 15;
+  let lTh = 8 + sw;    // left thigh (front leg)
+  let lSh = 10;        // left shin
+  let rTh = 8 - sw;    // right thigh (back leg)
+  let rSh = 10;
   let torsoTilt = 0;
   let crouching = false;
+  let bodyScale = 1;
 
+  // Action overrides
   if (f.action === 'punch') {
-    lArmA = -60; lForeA = -70; rArmA = 45; torsoTilt = 15;
+    lUA = -70; lLA = -50; rUA = 35; rLA = 25; torsoTilt = 18;
   } else if (f.action === 'kick') {
-    lLegA = -85; lShinA = -30; rLegA = 25; torsoTilt = -12;
-  } else if (f.action === 'block') {
-    lArmA = -50; lForeA = -80; rArmA = -50; rForeA = -80; torsoTilt = 8;
+    lTh = -90; lSh = -35; rTh = 20; rSh = 15; torsoTilt = -15;
+    lUA = -20; rUA = 40;
   } else if (f.action === 'crouch') {
-    crouching = true;
-    lLegA = 50; lShinA = -85; rLegA = -50; rShinA = 85; torsoTilt = 20;
+    crouching = true; bodyScale = 0.78;
+    lTh = 65; lSh = -100; rTh = -65; rSh = 100;
+    lUA = 30; rUA = 30; lLA = 40; rLA = 40; torsoTilt = 10;
   } else if (f.action === 'jump') {
-    lLegA = -35; rLegA = -35; lShinA = -40; rShinA = -40;
-    lArmA = -40; rArmA = -40;
+    lTh = -40; rTh = -40; lSh = -50; rSh = -50;
+    lUA = -50; rUA = -50; lLA = -20; rLA = -20;
   } else if (f.action === 'hurt') {
-    lArmA = 80; rArmA = 80; torsoTilt = -20;
+    torsoTilt = -22; lUA = 80; rUA = 80; lLA = 30; rLA = 30;
+    lTh = 15; rTh = -10;
   }
 
-  const toRad = (d: number) => (d * Math.PI) / 180;
+  const d2r = (deg: number) => (deg * Math.PI) / 180;
 
-  // Endpoint from pivot at given angle (0=down) and length
-  const ep = (px: number, py: number, angleDeg: number, len: number) => ({
-    x: px + Math.sin(toRad(angleDeg)) * len,
-    y: py + Math.cos(toRad(angleDeg)) * len,
+  // Compute endpoint given start, angle-from-vertical-down, length
+  const ep = (x: number, y: number, angleDeg: number, len: number) => ({
+    x: x + Math.sin(d2r(angleDeg)) * len,
+    y: y + Math.cos(d2r(angleDeg)) * len,
   });
 
-  // Shoulder joints
-  const lShoulder = { x: cx - 9, y: shoulderY };
-  const rShoulder = { x: cx + 9, y: shoulderY };
-  // Elbow
-  const lElbow = ep(lShoulder.x, lShoulder.y, lArmA, armLen);
-  const rElbow = ep(rShoulder.x, rShoulder.y, rArmA, armLen);
-  // Hand
-  const lHand = ep(lElbow.x, lElbow.y, lArmA + lForeA, foreLen);
-  const rHand = ep(rElbow.x, rElbow.y, rArmA + rForeA, foreLen);
+  // Joints (in local un-tilted space, tilting applied via SVG transform)
+  const shoulderL = { x: CX - 11, y: SHOULDER_Y };
+  const shoulderR = { x: CX + 11, y: SHOULDER_Y };
+  const hipL = { x: CX - 8, y: HIP_Y };
+  const hipR = { x: CX + 8, y: HIP_Y };
 
-  // Hip joints
-  const lHip = { x: cx - 7, y: hipY };
-  const rHip = { x: cx + 7, y: hipY };
-  // Knee
-  const lKnee = ep(lHip.x, lHip.y, lLegA, thighLen);
-  const rKnee = ep(rHip.x, rHip.y, rLegA, thighLen);
-  // Foot
-  const lFoot = ep(lKnee.x, lKnee.y, lLegA + lShinA, shinLen);
-  const rFoot = ep(rKnee.x, rKnee.y, rLegA + rShinA, shinLen);
+  const elbowL = ep(shoulderL.x, shoulderL.y, lUA, U_ARM);
+  const handL = ep(elbowL.x, elbowL.y, lUA + lLA, L_ARM);
+  const elbowR = ep(shoulderR.x, shoulderR.y, rUA, U_ARM);
+  const handR = ep(elbowR.x, elbowR.y, rUA + rLA, L_ARM);
 
-  const svgH = 220;
-  const sw = 5; // stroke width
+  const kneeL = ep(hipL.x, hipL.y, lTh, THIGH);
+  const footL = ep(kneeL.x, kneeL.y, lTh + lSh, SHIN);
+  const kneeR = ep(hipR.x, hipR.y, rTh, THIGH);
+  const footR = ep(kneeR.x, kneeR.y, rTh + rSh, SHIN);
+
+  // Weapon geometry
+  const weaponLines = getWeaponLines(weapon.id, handL, lUA + lLA, f.action);
+
+  const color = '#0a0a0a';
+  const strokeW = 7;
+  const pivotX = CX;
+  const pivotY = (SHOULDER_Y + HIP_Y) / 2;
+
+  // Screen position: feet at GY + f.y
+  const screenFeetY = GY + f.y;
 
   return (
     <svg
-      width={80}
-      height={svgH}
-      className="absolute z-10 overflow-visible"
+      width={SVG_W} height={SVG_H}
+      className="absolute z-20 overflow-visible"
       style={{
-        left: f.x - 40,
-        top: (GROUND_Y + f.y) - svgH,
-        transform: `scaleX(${f.facing})`,
-        transformOrigin: '40px center',
-        filter: hurt ? 'invert(1) brightness(0.4)' : 'none',
-        transition: 'filter 0.05s',
+        left: f.x - CX,
+        top: screenFeetY - FEET_Y,
+        transform: `scaleX(${f.facing}) scaleY(${bodyScale})`,
+        transformOrigin: `${CX}px ${FEET_Y}px`,
+        filter: hurt ? 'brightness(3) saturate(0)' : 'none',
+        transition: 'filter 0.04s',
       }}
     >
-      <g style={{ transform: `rotate(${torsoTilt}deg)`, transformOrigin: `${cx}px ${crouching ? hipY - 10 : (shoulderY + hipY) / 2}px` }}>
-        {/* back arm */}
-        <line x1={rShoulder.x} y1={rShoulder.y} x2={rElbow.x} y2={rElbow.y} stroke={color} strokeWidth={sw - 1} strokeLinecap="round" />
-        <line x1={rElbow.x} y1={rElbow.y} x2={rHand.x} y2={rHand.y} stroke={color} strokeWidth={sw - 1} strokeLinecap="round" />
-        {/* back leg */}
-        <line x1={rHip.x} y1={rHip.y} x2={rKnee.x} y2={rKnee.y} stroke={color} strokeWidth={sw} strokeLinecap="round" />
-        <line x1={rKnee.x} y1={rKnee.y} x2={rFoot.x} y2={rFoot.y} stroke={color} strokeWidth={sw} strokeLinecap="round" />
-        {/* torso */}
-        <line x1={cx} y1={shoulderY} x2={cx} y2={hipY} stroke={color} strokeWidth={sw + 3} strokeLinecap="round" />
-        {/* front leg */}
-        <line x1={lHip.x} y1={lHip.y} x2={lKnee.x} y2={lKnee.y} stroke={color} strokeWidth={sw + 1} strokeLinecap="round" />
-        <line x1={lKnee.x} y1={lKnee.y} x2={lFoot.x} y2={lFoot.y} stroke={color} strokeWidth={sw + 1} strokeLinecap="round" />
-        {/* front arm */}
-        <line x1={lShoulder.x} y1={lShoulder.y} x2={lElbow.x} y2={lElbow.y} stroke={color} strokeWidth={sw} strokeLinecap="round" />
-        <line x1={lElbow.x} y1={lElbow.y} x2={lHand.x} y2={lHand.y} stroke={color} strokeWidth={sw} strokeLinecap="round" />
-        {/* head */}
-        <circle cx={cx} cy={headCY} r={headR} fill={color} />
+      <g transform={`rotate(${torsoTilt}, ${pivotX}, ${pivotY})`}>
+        {/* === BACK ARM === */}
+        <line x1={shoulderR.x} y1={shoulderR.y} x2={elbowR.x} y2={elbowR.y} stroke={color} strokeWidth={strokeW - 1} strokeLinecap="round" />
+        <line x1={elbowR.x} y1={elbowR.y} x2={handR.x} y2={handR.y} stroke={color} strokeWidth={strokeW - 2} strokeLinecap="round" />
+        <circle cx={elbowR.x} cy={elbowR.y} r={3} fill={color} />
+
+        {/* === BACK LEG === */}
+        <line x1={hipR.x} y1={hipR.y} x2={kneeR.x} y2={kneeR.y} stroke={color} strokeWidth={strokeW + 1} strokeLinecap="round" />
+        <line x1={kneeR.x} y1={kneeR.y} x2={footR.x} y2={footR.y} stroke={color} strokeWidth={strokeW} strokeLinecap="round" />
+        <circle cx={kneeR.x} cy={kneeR.y} r={4} fill={color} />
+        {/* Foot */}
+        <line x1={footR.x} y1={footR.y} x2={footR.x + 14} y2={footR.y + 2} stroke={color} strokeWidth={5} strokeLinecap="round" />
+
+        {/* === TORSO === */}
+        <line x1={CX} y1={SHOULDER_Y} x2={CX} y2={HIP_Y} stroke={color} strokeWidth={strokeW + 5} strokeLinecap="round" />
+        {/* Neck */}
+        <line x1={CX} y1={NECK_Y} x2={CX} y2={SHOULDER_Y} stroke={color} strokeWidth={strokeW - 1} strokeLinecap="round" />
+
+        {/* === FRONT LEG === */}
+        <line x1={hipL.x} y1={hipL.y} x2={kneeL.x} y2={kneeL.y} stroke={color} strokeWidth={strokeW + 2} strokeLinecap="round" />
+        <line x1={kneeL.x} y1={kneeL.y} x2={footL.x} y2={footL.y} stroke={color} strokeWidth={strokeW + 1} strokeLinecap="round" />
+        <circle cx={kneeL.x} cy={kneeL.y} r={5} fill={color} />
+        {/* Foot */}
+        <line x1={footL.x} y1={footL.y} x2={footL.x + 16} y2={footL.y + 2} stroke={color} strokeWidth={6} strokeLinecap="round" />
+
+        {/* === FRONT ARM === */}
+        <line x1={shoulderL.x} y1={shoulderL.y} x2={elbowL.x} y2={elbowL.y} stroke={color} strokeWidth={strokeW} strokeLinecap="round" />
+        <line x1={elbowL.x} y1={elbowL.y} x2={handL.x} y2={handL.y} stroke={color} strokeWidth={strokeW - 1} strokeLinecap="round" />
+        <circle cx={elbowL.x} cy={elbowL.y} r={4} fill={color} />
+        {/* Fist */}
+        <circle cx={handL.x} cy={handL.y} r={6} fill={color} />
+
+        {/* === WEAPON === */}
+        {weaponLines}
+
+        {/* === HEAD === */}
+        <circle cx={CX} cy={HEAD_CY} r={HEAD_R} fill={color} />
+        {/* Eyes */}
+        <circle cx={CX + 5} cy={HEAD_CY - 3} r={2.5} fill="#1a1a1a" />
+        <circle cx={CX + 5} cy={HEAD_CY - 3} r={1} fill="#fff" opacity={0.15} />
       </g>
     </svg>
   );
-};
+}
 
-export default Arena;
+/* ═══════════════════════════════════════
+   WEAPON GEOMETRY
+═══════════════════════════════════════ */
+interface Pt { x: number; y: number }
+
+function getWeaponLines(id: WeaponId, handPt: Pt, armAngle: number, action: Action): React.ReactNode {
+  const d2r = (deg: number) => (deg * Math.PI) / 180;
+  const ep = (x: number, y: number, ang: number, len: number) => ({
+    x: x + Math.sin(d2r(ang)) * len,
+    y: y + Math.cos(d2r(ang)) * len,
+  });
+
+  const attacking = action === 'punch';
+  const wc = '#2a2a2a';
+
+  if (id === 'knuckles') {
+    // Brass knuckles: rectangle over fist
+    return (
+      <g>
+        <rect x={handPt.x - 10} y={handPt.y - 5} width={20} height={10} rx={3} fill={wc} stroke="#444" strokeWidth={1} />
+        {[-5, 0, 5].map((dx) => (
+          <rect key={dx} x={handPt.x + dx - 3} y={handPt.y - 9} width={5} height={5} rx={2} fill={wc} stroke="#444" strokeWidth={0.5} />
+        ))}
+      </g>
+    );
+  }
+
+  if (id === 'knives') {
+    // Two knives — one on hand
+    const tip = ep(handPt.x, handPt.y, armAngle - 10, attacking ? 52 : 36);
+    const guard1 = ep(handPt.x, handPt.y, armAngle + 80, 9);
+    const guard2 = ep(handPt.x, handPt.y, armAngle - 80, 9);
+    return (
+      <g>
+        {/* blade */}
+        <line x1={handPt.x} y1={handPt.y} x2={tip.x} y2={tip.y} stroke={wc} strokeWidth={3} strokeLinecap="round" />
+        {/* guard */}
+        <line x1={guard1.x} y1={guard1.y} x2={guard2.x} y2={guard2.y} stroke={wc} strokeWidth={4} strokeLinecap="round" />
+        {/* blade edge glint */}
+        <line x1={handPt.x} y1={handPt.y} x2={tip.x} y2={tip.y} stroke="#555" strokeWidth={1} strokeLinecap="round" />
+      </g>
+    );
+  }
+
+  if (id === 'katana') {
+    // Long katana blade
+    const len = attacking ? 110 : 82;
+    const tip = ep(handPt.x, handPt.y, armAngle - 5, len);
+    const pommel = ep(handPt.x, handPt.y, armAngle + 180, 18);
+    const guard1 = ep(handPt.x, handPt.y, armAngle + 82, 14);
+    const guard2 = ep(handPt.x, handPt.y, armAngle - 82, 14);
+    return (
+      <g>
+        {/* handle */}
+        <line x1={handPt.x} y1={handPt.y} x2={pommel.x} y2={pommel.y} stroke={wc} strokeWidth={5} strokeLinecap="round" />
+        {/* guard */}
+        <line x1={guard1.x} y1={guard1.y} x2={guard2.x} y2={guard2.y} stroke={wc} strokeWidth={5} strokeLinecap="round" />
+        {/* blade */}
+        <line x1={handPt.x} y1={handPt.y} x2={tip.x} y2={tip.y} stroke={wc} strokeWidth={3.5} strokeLinecap="round" />
+        {/* glint edge */}
+        <line x1={handPt.x} y1={handPt.y} x2={tip.x} y2={tip.y} stroke="#666" strokeWidth={1} strokeLinecap="round" />
+      </g>
+    );
+  }
+
+  return null;
+}
