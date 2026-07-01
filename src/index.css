@@ -99,3 +99,41 @@
     @apply bg-background text-foreground;
   }
 }
+
+.pixelated {
+  image-rendering: pixelated;
+}
+
+.crt-lines::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background: repeating-linear-gradient(
+    to bottom,
+    rgba(0, 0, 0, 0) 0px,
+    rgba(0, 0, 0, 0) 2px,
+    rgba(0, 0, 0, 0.25) 3px,
+    rgba(0, 0, 0, 0.25) 4px
+  );
+  z-index: 50;
+  mix-blend-mode: multiply;
+  opacity: 0.5;
+}
+
+.crt-vignette::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background: radial-gradient(
+    ellipse at center,
+    transparent 55%,
+    rgba(0, 0, 0, 0.75) 100%
+  );
+  z-index: 49;
+}
+
+.text-shadow-pixel {
+  text-shadow: 4px 4px 0 rgba(0, 0, 0, 0.4);
+}
