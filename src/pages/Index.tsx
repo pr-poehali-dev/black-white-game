@@ -9,7 +9,6 @@ type Screen =
   | 'settings'
   | 'comingsoon'
   | 'credits'
-  | 'blackscreen'
   | 'arena'
   | 'victory';
 
@@ -20,11 +19,7 @@ const MENU = [
   { key: 'settings', label: 'SETTINGS', n: 2 },
   { key: 'credits', label: 'CREDITS', n: 3 },
   { key: 'comingsoon', label: 'COMING SOON...', n: 4 },
-  { key: 'blackscreen', label: 'BLACK SCREEN', n: 5 },
 ] as const;
-
-// floating pixel-art background icons
-const BG_ICONS = ['💀', '🐱', '🖤'];
 
 const Index = () => {
   const [screen, setScreen] = useState<Screen>('menu');
@@ -34,20 +29,12 @@ const Index = () => {
 
   const goMenu = useCallback(() => setScreen('menu'), []);
 
-  // BLACK SCREEN — любая клавиша возвращает в меню
-  useEffect(() => {
-    if (screen !== 'blackscreen') return;
-    const handler = () => goMenu();
-    window.addEventListener('keydown', handler);
-    window.addEventListener('click', handler);
-    return () => {
-      window.removeEventListener('keydown', handler);
-      window.removeEventListener('click', handler);
-    };
-  }, [screen, goMenu]);
-
   return (
     <div className="crt-lines crt-vignette min-h-screen bg-black text-white overflow-hidden select-none">
+      <div className="fixed bottom-3 left-4 z-[60] font-mono text-white/40 text-sm tracking-widest animate-flicker pointer-events-none">
+        Alone.exe started.
+      </div>
+
       {screen === 'menu' && <MenuScreen onSelect={(s) => setScreen(s)} />}
 
       {screen === 'weapons' && (
@@ -68,14 +55,6 @@ const Index = () => {
 
       {screen === 'credits' && <CreditsScreen onBack={goMenu} />}
 
-      {screen === 'blackscreen' && (
-        <div className="fixed inset-0 bg-black flex items-center justify-center animate-fade-in">
-          <p className="font-mono text-white/20 text-lg tracking-widest animate-flicker">
-            нажми любую клавишу
-          </p>
-        </div>
-      )}
-
       {screen === 'arena' && (
         <Arena
           playerWeapon={playerWeapon}
@@ -92,23 +71,6 @@ const Index = () => {
 /* ---------- MAIN MENU ---------- */
 const MenuScreen = ({ onSelect }: { onSelect: (s: Screen) => void }) => (
   <div className="relative flex flex-col items-center justify-center min-h-screen animate-fade-in">
-    {/* floating bg icons */}
-    {BG_ICONS.map((icon, i) => (
-      <div
-        key={i}
-        className="absolute animate-float-bg pointer-events-none pixelated"
-        style={{
-          left: `${15 + i * 30}%`,
-          top: `${20 + (i % 2) * 40}%`,
-          fontSize: '120px',
-          animationDelay: `${i * 2}s`,
-          filter: 'grayscale(1) contrast(2)',
-        }}
-      >
-        {icon}
-      </div>
-    ))}
-
     <h1 className="font-pixel text-7xl md:text-8xl text-white text-shadow-pixel mb-2 z-10 animate-glitch">
       ALONE
     </h1>
